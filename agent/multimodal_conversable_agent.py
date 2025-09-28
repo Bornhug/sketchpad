@@ -9,7 +9,25 @@ from autogen.agentchat.contrib.img_utils import (
 )
 from autogen.code_utils import content_str
 
-from autogen._pydantic import model_dump
+#from autogen._pydantic import model_dump
+# Robust import for pydantic-compatible model_dump
+try:
+    # Older AutoGen builds
+    from autogen._pydantic import model_dump          # type: ignore[import-not-found]
+except Exception:
+    try:
+        # Newer AutoGen builds (split into autogen_core)
+        from autogen_core._pydantic_compat import model_dump  # type: ignore[import-not-found]
+    except Exception:
+        # Universal fallback: works with Pydantic v1 and v2
+        def model_dump(x):
+            if hasattr(x, "model_dump"):   # Pydantic v2
+                return x.model_dump()
+            if hasattr(x, "dict"):         # Pydantic v1
+                return x.dict()
+            return x
+
+
 
 DEFAULT_LMM_SYS_MSG = """You are a helpful AI assistant."""
 DEFAULT_MODEL = "gpt-4-turbo"
