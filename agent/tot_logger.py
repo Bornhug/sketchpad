@@ -17,13 +17,17 @@ class TraceLogger:
     def __init__(self,
                  out_path: Path,
                  autosave: bool = True,
-                 indent: int = 4):
+                 indent: int = 4,
+                 assistant_name: str = "planner",
+                 user_name: str = "multimodal_user_agent"):
         self.out_path = Path(out_path)
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
         self._messages: List[Dict[str, Any]] = []
         self._step = 0
         self._indent = indent
         self._autosave = autosave
+        self._assistant_name = assistant_name
+        self._user_name = user_name
 
     # ---------- Public API ----------
     def next_step(self) -> int:
@@ -32,10 +36,14 @@ class TraceLogger:
         return s
 
     def record_user_request(self, text: str) -> None:
-        self._append("user", text)
+        self._append("user", text, name=self._user_name)
 
     def thought(self, k: int, text: str) -> None:
-        self._append("assistant", f"# THOUGHT {k}:\n{text}")
+        self._append("assistant", f"# THOUGHT {k}:\n{text}", name=self._assistant_name)
+
+    def system(self, text: str) -> None:
+        """Record setup/instructional content as an assistant message."""
+        self._append("assistant", text, name=self._assistant_name)
 
     def action(self, k: int, code_or_text: str, language: str = "python") -> None:
         # If it's code, wrap in a fenced block just like your sample
@@ -43,23 +51,25 @@ class TraceLogger:
             payload = f"# ACTION {k}:\n```{language}\n{code_or_text}\n```"
         else:
             payload = f"# ACTION {k}:\n{code_or_text}"
-        self._append("assistant", payload)
+        self._append("assistant", payload, name=self._assistant_name)
 
     def observation(self, text: str) -> None:
-        self._append("user", f"OBSERVATION: {text}")
+        self._append("user", f"OBSERVATION: {text}", name=self._user_name)
 
     def answer_and_terminate(self, answer_text: str) -> None:
-        self._append("assistant", f"ANSWER: {answer_text} TERMINATE")
+        self._append("assistant", f"ANSWER: {answer_text} TERMINATE", name=self._assistant_name)
 
     def save(self) -> None:
         self._atomic_write(self._messages)
 
     # ---------- Helpers ----------
-    def _append(self, role: str, text: str) -> None:
+    def _append(self, role: str, text: str, *, name: Optional[str] = None) -> None:
         msg = {
             "content": [{"type": "text", "text": text}],
             "role": role,
         }
+        if name:
+            msg["name"] = name
         self._messages.append(msg)
         if self._autosave:
             self._atomic_write(self._messages)

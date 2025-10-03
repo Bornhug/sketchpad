@@ -10,8 +10,14 @@ from main import run_agent
 
 # run a example for geometry. save the execution trace, answer, and usage summary under outputs/geometry
 run_agent(
-    "/mnt/c/Users/apex/Code/Python/8539/sketchpad/tasks/geometry/2079",
+    "/mnt/c/Users/apex/Code/Python/8539/sketchpad/tasks/geometry/1053",
     "/home/apex/sketchpad_runs/geometry",
     task_type="geo",
     task_name="geometry",
+    search_mode = "tot",           
+    tot_strategy = "bfs",             
+    tot_branch = 3,
+    tot_beam = 2,
+    tot_steps = 3
 )
+

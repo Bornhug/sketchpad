@@ -102,7 +102,7 @@ def run_agent(
     tot_strategy: str = "bfs",             # "bfs" | "dfs" | "best_first"
     tot_branch: int = 3,
     tot_beam: int = 4,
-    tot_steps: int = 8
+    tot_steps: int = 3
 ):
     """Run the Visual Sketchpad agent on one task instance.
 
@@ -129,6 +129,10 @@ def run_agent(
         copy_function=shutil.copy  # uses copyfile + copymode (lighter than copy2)
     )
 
+    prompt_payload = None
+    query_text = ""
+    images: List[str] = []
+
     if task_type == "vision":
         # test if vision tools are loaded
         try:
@@ -137,13 +141,15 @@ def run_agent(
             raise ImportError("Vision tools are not loaded. Please install vision_experts.") from e
 
         task_metadata = json.load(open(os.path.join(task_input, "request.json"), "r", encoding="utf-8"))
-        query = (
+        query_field = (
             task_metadata.get("query")
             or task_metadata.get("input")
             or task_metadata.get("question")
             or ""
         )
         images = _as_image_list(task_metadata.get("images") or task_metadata.get("image"))
+        query_text = query_field or _as_query_text(task_metadata)
+        prompt_payload = query_text
 
         prompt_generator = ReACTPrompt()
         parser = Parser()
@@ -157,7 +163,8 @@ def run_agent(
 
     elif task_type == "math":
         payload = json.load(open(os.path.join(task_input, "example.json"), "r", encoding="utf-8"))
-        query = _as_query_text(payload)
+        prompt_payload = payload
+        query_text = _as_query_text(payload)
         images = []
         prompt_generator = MathPrompt(task_name)
         parser = Parser()
@@ -210,11 +217,14 @@ def run_agent(
             """)
             rc, out, err = _exec_norm(executor, init_code)
             if rc != 0:
-                raise RuntimeError(f"Failed to build base canvas.\nSTDERR: {err}\nSTDOUT: {out}")
+                print("[WARN] Failed to build base canvas (math). Proceeding without it.")
+                print("stderr:", err[:500] if isinstance(err, str) else err)
+                print("stdout:", out[:500] if isinstance(out, str) else out)
 
     elif task_type == "geo":
         payload = json.load(open(os.path.join(task_input, "ex.json"), "r", encoding="utf-8"))
-        query = _as_query_text(payload)
+        prompt_payload = payload
+        query_text = payload.get("problem_text") or _as_query_text(payload)
         images = []
         prompt_generator = GeoPrompt()
         parser = Parser()
@@ -267,7 +277,9 @@ def run_agent(
             """)
             rc, out, err = _exec_norm(executor, init_code)
             if rc != 0:
-                raise RuntimeError(f"Failed to build base canvas.\nSTDERR: {err}\nSTDOUT: {out}")
+                print("[WARN] Failed to build base canvas (geo). Proceeding without it.")
+                print("stderr:", err[:500] if isinstance(err, str) else err)
+                print("stdout:", out[:500] if isinstance(out, str) else out)
 
 
 
@@ -288,13 +300,23 @@ def run_agent(
 
     # =================================
 
-    S0 = VState(question=_as_query_text(query), text_trace="", canvas=init_canvas)
+    if prompt_payload is None:
+        prompt_payload = query_text
+
+    try:
+        initial_prompt_text = prompt_generator.initial_prompt(prompt_payload, len(images))
+    except Exception:
+        initial_prompt_text = query_text or ""
+
+    S0 = VState(question=initial_prompt_text or query_text or "", text_trace="", canvas=init_canvas)
     # ===== Trace logging setup =====
     trace_path = os.path.join(task_directory, "trace.json")
     logger = TraceLogger(trace_path, autosave=True)
 
     # record the initial user message/question in the trace
-    logger.record_user_request(_as_query_text(query))
+    logger.record_user_request(query_text or "")
+    if initial_prompt_text:
+        logger.system(initial_prompt_text)
 
     # simple local step counter for pairing THOUGHT/ACTION/OBSERVATION
     _trace_step = {"k": 0}
@@ -326,24 +348,74 @@ def run_agent(
         llm_config=llm_config
     )
 
+    if initial_prompt_text:
+        try:
+            formatted = planner._message_to_dict(initial_prompt_text)
+            planner._oai_messages.setdefault(user, [])
+            planner._oai_messages[user].append({
+                "role": "user",
+                "content": formatted["content"],
+            })
+        except Exception:
+            planner._oai_messages.setdefault(user, [])
+            planner._oai_messages[user].append({
+                "role": "user",
+                "content": initial_prompt_text,
+            })
+
     # >>> ADDED for ToT — LLM completion adapter used by tot_prompts
     def llm_complete(prompt: str) -> str:
-        """
-        Minimal adapter so ToT propose/eval share the same LLM config as `planner`.
-        """
+        """Share planner context with ToT completions so prompts stay consistent."""
+        from copy import deepcopy
+
+        messages = []
+        system_msgs = getattr(planner, "_oai_system_message", [])
+        if system_msgs:
+            messages.extend(deepcopy(system_msgs))
+
+        history = getattr(planner, "_oai_messages", {})
+        if history:
+            messages.extend(deepcopy(history.get(user, [])))
+
+        prompt_dict = planner._message_to_dict(prompt)
+        messages.append({
+            "role": "user",
+            "content": deepcopy(prompt_dict.get("content", []))
+        })
+
+        print("[ToT] llm_complete planner.client is None?", planner.client is None, flush=True)
+        print("[ToT] llm_complete message count:", len(messages), flush=True)
+
+        if planner.client is None:
+            print("[ToT] planner has no client; returning empty string", flush=True)
+            return ""
+
         try:
-            return planner.client.complete(prompt)
-        except Exception:
-            tmp = MultimodalConversableAgent(
-                name="tot_eval",
-                human_input_mode='NEVER',
-                max_consecutive_auto_reply=1,
-                is_termination_msg=lambda x: False,
-                system_message="You are a concise scoring assistant.",
-                llm_config=llm_config
-            )
-            reply = tmp.generate_reply(messages=[{"role": "user", "content": prompt}])
-            return reply if isinstance(reply, str) else reply.get("content", "")
+            ok, reply = planner.generate_oai_reply(messages=messages, sender=user)
+            print("[ToT] planner.generate_oai_reply ->", ok, type(reply), flush=True)
+            if ok:
+                return reply if isinstance(reply, str) else reply.get("content", "")
+        except Exception as e:
+            print("[ToT] planner.generate_oai_reply failed:", repr(e), flush=True)
+
+        tmp = MultimodalConversableAgent(
+            name="tot_eval",
+            human_input_mode='NEVER',
+            max_consecutive_auto_reply=1,
+            is_termination_msg=lambda x: False,
+            system_message="You are a concise scoring assistant.",
+            llm_config=llm_config
+        )
+
+        try:
+            ok, reply = tmp.generate_oai_reply(messages=messages[-1:])
+            print("[ToT] fallback generate_oai_reply ->", ok, type(reply), flush=True)
+            if ok:
+                return reply if isinstance(reply, str) else reply.get("content", "")
+        except Exception as e:
+            print("[ToT] fallback generate_oai_reply failed:", repr(e), flush=True)
+
+        return ""
 
     # >>> ADDED for ToT — glue functions
     def propose_thoughts(state: VState, K: int) -> List[dict]:
@@ -369,10 +441,36 @@ def run_agent(
         # ---- log THOUGHT (goal/why) ---------------------------------------------
         k = _next_k()
         goal = thought.get("goal", "")
-        rationale = thought.get("rationale", "")
-        if goal or rationale:
-            logger.thought(k, f"[goal] {goal}\n[why] {rationale}")
-            new_state.text_trace = (new_state.text_trace + f"\n[goal] {goal}\n[why] {rationale}\n").strip()
+        rationale_raw = str(thought.get("rationale", ""))
+        stop_signal = bool(thought.get("stop_signal"))
+
+        final_answer_line = None
+        if "FINAL_ANSWER:" in rationale_raw:
+            after = rationale_raw.split("FINAL_ANSWER:", 1)[1].strip()
+            if after:
+                final_answer_line = after.splitlines()[0].strip()
+
+        rationale_clean = rationale_raw
+        if not stop_signal and final_answer_line:
+            rationale_clean = "\n".join(
+                ln for ln in rationale_raw.splitlines()
+                if "FINAL_ANSWER:" not in ln
+            ).strip()
+
+        thought_lines: list[str] = []
+        if goal:
+            thought_lines.append(f"[goal] {goal}")
+        if rationale_clean:
+            thought_lines.append(f"[why] {rationale_clean}")
+        if stop_signal:
+            thought_lines.append("[stop] true")
+            if final_answer_line:
+                thought_lines.append(f"FINAL_ANSWER: {final_answer_line}")
+
+        if thought_lines:
+            logger.thought(k, "\n".join(thought_lines))
+            block = "\n".join(thought_lines)
+            new_state.text_trace = (new_state.text_trace + "\n" + block).strip()
         else:
             logger.thought(k, "(no explicit goal/why provided)")
 
@@ -386,6 +484,10 @@ def run_agent(
             else:
                 # allow bare strings as comments
                 actions.append({"op": "comment", "text": str(a)})
+
+        if stop_signal and final_answer_line:
+            new_state.has_final_answer = True
+            new_state.answer = final_answer_line
 
         # ---- no actions? still log ------------------------------------------------
         if not actions:
@@ -531,10 +633,21 @@ def run_agent(
             plt.close(fig)
         """)
 
-        res = executor.execute(py)
         rc, out, err = _exec_norm(executor, py)
         if rc != 0:
             raise RuntimeError(f"Drawing failed: {err or out}")
+
+        # summarize execution for the trace
+        obs_items: list[str] = ["rc=" + str(rc)]
+        if out:
+            clipped = out if len(out) <= 200 else out[:200] + "…"
+            obs_items.append("stdout=" + clipped)
+        if err:
+            clipped_err = err if len(err) <= 200 else err[:200] + "…"
+            obs_items.append("stderr=" + clipped_err)
+        if actions:
+            obs_items.append(f"actions={len(actions)}")
+        logger.observation("; ".join(obs_items))
 
         new_state.canvas = os.path.join(task_directory, "tot_canvas.png")
         return new_state
@@ -597,7 +710,10 @@ def run_agent(
                     # Last fallback: try a heuristic from the end of text_trace
                     lines = [ln.strip() for ln in tt.splitlines() if ln.strip()]
                     if lines:
-                        final_answer = lines[-1]
+                        for candidate in reversed(lines):
+                            if candidate not in {"[goal]", "[why]"}:
+                                final_answer = candidate
+                                break
 
                 if final_answer:
                     logger.answer_and_terminate(final_answer)
@@ -628,12 +744,14 @@ def run_agent(
                 planner,
                 n_image=len(images),
                 task_id="testing_case",
-                message=_as_query_text(query),
+                message=prompt_payload,
                 log_prompt_only=False,
             )
             all_messages = planner.chat_messages[user]
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(e)
         all_messages = {'error': getattr(e, 'message', str(e))}
 

@@ -169,13 +169,21 @@ class ToTController:
                 # with:
                 try:
                     thoughts = self.propose_fn(cur.state, self.cfg.beam_width)
-                    if not isinstance(thoughts, list): thoughts = []
+                    if not isinstance(thoughts, list):
+                        print("[ToT] propose_fn returned", type(thoughts))
+                        thoughts = []
+                    else:
+                        print("[ToT] propose_fn thoughts count", len(thoughts))
                 except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    print("[ToT] propose_fn raised", repr(e))
                     thoughts = []
 
                 children: List[Node] = []
-                for τ in thoughts:
-                    s_next = self.apply_fn(cur.state, τ)
+                for thought in thoughts:
+                    print("[ToT] applying thought goal:", thought.get('goal') if isinstance(thought, dict) else type(thought))
+                    s_next = self.apply_fn(cur.state, thought)
 
                     # later, before scoring each child:
                     try:
@@ -187,12 +195,12 @@ class ToTController:
                     if sc >= self.cfg.prune_threshold:
                         child = Node(
                             state=s_next, score=sc, step=cur.step + 1,
-                            path=cur.path + [τ], done=False
+                            path=cur.path + [thought], done=False
                         )
                         # >>> ADD: log child and assign id
                         if self.logger:
                             child.node_id = self.logger.log_node(parent_id=cur.node_id, step=child.step,
-                                                                 score=child.score, thought=τ,
+                                                                 score=child.score, thought=thought,
                                                                  state=child.state, done=False)
                         # <<<
                         children.append(child)

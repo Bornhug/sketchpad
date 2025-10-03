@@ -1,0 +1,64 @@
+{
+  "final_score": 0.2,
+  "steps": 3,
+  "thoughts": [
+    {
+      "goal": "Find AC",
+      "actions": [
+        {
+          "type": "calculate_side_length",
+          "args": {
+            "side": "AB",
+            "angle": "C"
+          }
+        },
+        {
+          "type": "round",
+          "args": {
+            "value": "AC",
+            "precision": 1
+          }
+        }
+      ],
+      "expected_observation": "AC is calculated and rounded to the nearest tenth.",
+      "stop_signal": false
+    },
+    {
+      "goal": "Find AC",
+      "actions": [
+        {
+          "type": "calculate_length",
+          "args": {
+            "points": [
+              "A",
+              "C"
+            ]
+          }
+        },
+        {
+          "type": "round",
+          "args": {
+            "value": "length_AC",
+            "precision": 1
+          }
+        }
+      ],
+      "expected_observation": "The length AC rounded to the nearest tenth.",
+      "stop_signal": false
+    },
+    {
+      "goal": "Round AC to the nearest tenth",
+      "actions": [
+        {
+          "type": "round",
+          "args": {
+            "value": "AC",
+            "decimal_places": 1
+          }
+        }
+      ],
+      "expected_observation": "AC rounded to the nearest tenth",
+      "stop_signal": true
+    }
+  ]
+}

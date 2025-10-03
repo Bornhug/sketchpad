@@ -1,0 +1,11 @@
+{
+    "tot": {
+        "strategy": "bfs",
+        "branch": 3,
+        "beam": 4,
+        "max_steps": 8
+    },
+    "final_rationale": "[goal] Find AC\n[why]\n[goal] Find AC\n[why]\n[goal] Round AC to the nearest tenth\n[why]",
+    "final_canvas": "tot_canvas.png",
+    "score": 0.2
+}
